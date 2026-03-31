@@ -1,0 +1,253 @@
+﻿using System.Collections.Concurrent;
+using Telegram.Bot;
+using Telegram.Bot.Polling;
+using Telegram.Bot.Types;
+using Telegram.Bot.Types.Enums;
+using Telegram.Bot.Types.ReplyMarkups;
+
+namespace _4_6_TelegramBot;
+
+class Program
+{
+    private static TelegramBotClient? _bot;
+
+    // Userlarning holati: "idle", "searching", "chatting"
+    private static readonly ConcurrentDictionary<long, string> _userStates = new();
+
+    // Suhbatlashayotgan juftliklar (Anonim chat uchun)
+    private static readonly ConcurrentDictionary<long, long> _activeChats = new();
+
+    // Navbat (Anonim chat uchun)
+    private static readonly ConcurrentQueue<long> _waitingQueue = new();
+
+    // Usernamelarni ID bilan bog'lash uchun (Direct message uchun)
+    // Key: username (kichik harflarda), Value: chatIdss
+    private static readonly ConcurrentDictionary<string, long> _usernameMap = new();
+
+    // Keyboard menyular
+    private static readonly ReplyKeyboardMarkup MainMenu = new(new[]
+    {
+        new KeyboardButton[] { "🔍 Suhbatdosh izlash" }
+    })
+    { ResizeKeyboard = true };
+
+    private static readonly ReplyKeyboardMarkup CancelMenu = new(new[]
+    {
+        new KeyboardButton[] { "🚫 Bekor qilish" }
+    })
+    { ResizeKeyboard = true };
+
+    private static readonly ReplyKeyboardMarkup ChatMenu = new(new[]
+    {
+        new KeyboardButton[] { "❌ Suhbatni yakunlash" },
+        new KeyboardButton[] { "🔄 Boshqasini topish" }
+    })
+    { ResizeKeyboard = true };
+
+    static async Task Main()
+    {
+        // Tokeningizni bu yerga kiriting
+        _bot = new TelegramBotClient("8783681570:AAFe2R-kYlfZ1YQas-C9goLdalBXJIAs-PI");
+
+        using var cts = new CancellationTokenSource();
+        var receiverOptions = new ReceiverOptions { AllowedUpdates = Array.Empty<UpdateType>() };
+
+        _bot.StartReceiving(HandleUpdateAsync, HandleErrorAsync, receiverOptions, cancellationToken: cts.Token);
+
+        Console.WriteLine("Bot ishga tushdi...");
+        Console.ReadLine();
+        cts.Cancel();
+    }
+
+    private static async Task HandleUpdateAsync(ITelegramBotClient bot, Update update, CancellationToken ct)
+    {
+        if (update.Type == UpdateType.Message && update.Message != null)
+        {
+            await HandleMessageAsync(update.Message, ct);
+        }
+    }
+
+    private static async Task HandleMessageAsync(Message message, CancellationToken ct)
+    {
+        var chatId = message.Chat.Id;
+        var text = message.Text;
+
+        // 1. Foydalanuvchini lug'atga saqlash (username bo'yicha topish uchun)
+        if (!string.IsNullOrEmpty(message.From?.Username))
+        {
+            _usernameMap[message.From.Username.ToLower()] = chatId;
+        }
+
+        // 2. /start buyrug'i
+        if (text == "/start")
+        {
+            await DisconnectChat(chatId, ct);
+            _userStates[chatId] = "idle";
+            await _bot!.SendMessage(chatId,
+                "<b>Assalomu alaykum! Anonim chatga xush kelibsiz.</b>\n\n" +
+                "💡 <b>Xususiyat:</b> Xohlagan odamingizga @username orqali xabar yuborishingiz mumkin.\n" +
+                "Masalan: <code>@username salom qandaysan?</code>",
+                parseMode: ParseMode.Html, replyMarkup: MainMenu, cancellationToken: ct);
+            return;
+        }
+
+        // 3. To'g'ridan-to'g'ri @username orqali xabar yuborishni tekshirish
+        if (text != null && text.StartsWith("@"))
+        {
+            await HandleDirectMessage(message, ct);
+            return;
+        }
+
+        // 4. Holatga qarab anonim chat logikasi
+        var state = _userStates.GetValueOrDefault(chatId, "idle");
+
+        switch (state)
+        {
+            case "idle":
+                if (text == "🔍 Suhbatdosh izlash")
+                    await StartSearch(chatId, ct);
+                else
+                    await _bot!.SendMessage(chatId, "Iltimos, menyudan foydalaning 👇", replyMarkup: MainMenu, cancellationToken: ct);
+                break;
+
+            case "searching":
+                if (text == "🚫 Bekor qilish")
+                    await CancelSearch(chatId, ct);
+                else
+                    await _bot!.SendMessage(chatId, "Suhbatdosh qidirilmoqda...", replyMarkup: CancelMenu, cancellationToken: ct);
+                break;
+
+            case "chatting":
+                if (text == "❌ Suhbatni yakunlash")
+                {
+                    await DisconnectChat(chatId, ct);
+                    await _bot!.SendMessage(chatId, "Suhbat yakunlandi.", replyMarkup: MainMenu, cancellationToken: ct);
+                }
+                else if (text == "🔄 Boshqasini topish")
+                {
+                    await DisconnectChat(chatId, ct);
+                    await StartSearch(chatId, ct);
+                }
+                else
+                {
+                    await ForwardToPartner(chatId, message, ct);
+                }
+                break;
+        }
+    }
+
+    // --- To'g'ridan-to'g'ri xabar yuborish (Username orqali) ---
+    private static async Task HandleDirectMessage(Message message, CancellationToken ct)
+    {
+        var senderId = message.Chat.Id;
+        var text = message.Text;
+
+        // Xabarni bo'laklash: @username va xabar matni
+        var parts = text!.Split(' ', 2);
+
+        if (parts.Length < 2)
+        {
+            await _bot!.SendMessage(senderId, "⚠️ <b>Xato format.</b>\nNamuna: <code>@username Salom!</code>", parseMode: ParseMode.Html, cancellationToken: ct);
+            return;
+        }
+
+        string targetUsername = parts[0].TrimStart('@').ToLower();
+        string messageBody = parts[1];
+
+        if (_usernameMap.TryGetValue(targetUsername, out long targetChatId))
+        {
+            try
+            {
+                string senderInfo = message.From?.Username != null ? $"@{message.From.Username}" : "Anonim";
+
+                // HTML rejimi orqali yuborish (xavfsizroq)
+                await _bot!.SendMessage(
+                    chatId: targetChatId,
+                    text: $"📩 <b>Yangi xabar keldi!</b>\n<b>Kimdan:</b> {senderInfo}\n\n<b>Xabar:</b> {messageBody}",
+                    parseMode: ParseMode.Html,
+                    cancellationToken: ct
+                );
+
+                await _bot!.SendMessage(senderId, $"✅ Xabaringiz @{targetUsername} ga yetkazildi.", cancellationToken: ct);
+            }
+            catch (Exception ex)
+            {
+                // Agar foydalanuvchi botni bloklagan bo'lsa yoki boshqa texnik xato bo'lsa
+                Console.WriteLine($"Xato: {ex.Message}");
+                await _bot!.SendMessage(senderId, "❌ Xabarni yuborib bo'lmadi (foydalanuvchi botni bloklagan bo'lishi mumkin).", cancellationToken: ct);
+            }
+        }
+        else
+        {
+            await _bot!.SendMessage(senderId, $"🔍 Kechirasiz, @{targetUsername} botimizda topilmadi. U botga kamida bir marta /start bosgan bo'lishi kerak.", cancellationToken: ct);
+        }
+    }
+
+    private static async Task StartSearch(long chatId, CancellationToken ct)
+    {
+        _userStates[chatId] = "searching";
+        await _bot!.SendMessage(chatId, "Suhbatdosh qidirilmoqda... ⏳", replyMarkup: CancelMenu, cancellationToken: ct);
+
+        while (_waitingQueue.TryDequeue(out var partnerId))
+        {
+            // O'z-o'zi bilan tushib qolmaslik va hamon qidirayotganini tekshirish
+            if (partnerId != chatId && _userStates.GetValueOrDefault(partnerId) == "searching")
+            {
+                _activeChats[chatId] = partnerId;
+                _activeChats[partnerId] = chatId;
+                _userStates[chatId] = "chatting";
+                _userStates[partnerId] = "chatting";
+
+                await _bot.SendMessage(chatId, "Suhbatdosh topildi! 🎉", replyMarkup: ChatMenu, cancellationToken: ct);
+                await _bot.SendMessage(partnerId, "Suhbatdosh topildi! 🎉", replyMarkup: ChatMenu, cancellationToken: ct);
+                return;
+            }
+        }
+        _waitingQueue.Enqueue(chatId);
+    }
+
+    private static async Task CancelSearch(long chatId, CancellationToken ct)
+    {
+        _userStates[chatId] = "idle";
+        await _bot!.SendMessage(chatId, "Qidiruv bekor qilindi.", replyMarkup: MainMenu, cancellationToken: ct);
+    }
+
+    private static async Task DisconnectChat(long chatId, CancellationToken ct)
+    {
+        if (_activeChats.TryRemove(chatId, out var partnerId))
+        {
+            _activeChats.TryRemove(partnerId, out _);
+            _userStates[chatId] = "idle";
+            _userStates[partnerId] = "idle";
+
+            try
+            {
+                await _bot!.SendMessage(partnerId, "Suhbatdosh suhbatni tark etdi. 😔", replyMarkup: MainMenu, cancellationToken: ct);
+            }
+            catch { }
+        }
+    }
+
+    private static async Task ForwardToPartner(long senderId, Message message, CancellationToken ct)
+    {
+        if (_activeChats.TryGetValue(senderId, out var partnerId))
+        {
+            try
+            {
+                // Xabarni (rasm, matn, stiker va h.k.) sherigiga nusxalash
+                await _bot!.CopyMessage(partnerId, senderId, message.MessageId, cancellationToken: ct);
+            }
+            catch
+            {
+                await DisconnectChat(senderId, ct);
+                await _bot!.SendMessage(senderId, "Suhbat yakunlandi (partner botni blokladi).", replyMarkup: MainMenu, cancellationToken: ct);
+            }
+        }
+    }
+
+    private static Task HandleErrorAsync(ITelegramBotClient bot, Exception exception, CancellationToken ct)
+    {
+        Console.WriteLine("Botda xatolik: " + exception.Message);
+        return Task.CompletedTask;
+    }
+}

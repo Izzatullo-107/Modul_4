@@ -1,0 +1,128 @@
+﻿namespace _4_7_TG_bot_lar;
+using _4_7_TG_bot_lar.Extensions;
+using Telegram.Bot;
+using Telegram.Bot.Exceptions;
+using Telegram.Bot.Polling;
+using Telegram.Bot.Types;
+using Telegram.Bot.Types.Enums;
+using Telegram.Bot.Types.ReplyMarkups;
+
+public class Program
+{
+    private static IDictionary<string, string> _data_ramadan = new Dictionary<string, string>();
+    private static ITelegramBotClient _bot;
+    private static string BotToken = "8783681570:AAFe2R-kYlfZ1YQas-C9goLdalBXJIAs-PI";
+    static async Task Main(string[] args)
+    {
+        _bot = new TelegramBotClient(BotToken);
+
+        _data_ramadan = DictionaryExtensions.DataRamadan();// DictionaryExtensions dan clasdan _data_ramadan ni olamiz(taqvimni)
+
+        _bot.StartReceiving(HandleUpdateAsync, HandleErrorAsync);
+
+        Console.WriteLine("Anonim bot ishga tushdi...");
+        Console.ReadLine();
+    }
+
+    private static async Task HandleUpdateAsync(ITelegramBotClient bot, Update update, CancellationToken ct)
+    {
+        var chatId = update.Message?.Chat.Id;
+        var name = update.Message?.Chat.FirstName;
+        //var data = update.CallbackQuery.Data;
+
+        if(update.CallbackQuery != null)
+{
+
+            string callData = update.CallbackQuery.Data;
+            long callbackChatId = update.CallbackQuery.Message.Chat.Id;
+            int messageId = update.CallbackQuery.Message.MessageId; // Eski xabar ID-si
+
+            if (_data_ramadan.TryGetValue(callData, out string info))
+            {
+                // 1. Eski 30 talik tugmani o'chirish
+                await bot.DeleteMessage(callbackChatId, messageId);
+
+                // 2. Yangi ma'lumotni yuborish
+                await bot.SendMessage(callbackChatId, $"📅 {callData}:\n\n{info}");
+
+                // 3. Bildirishnomani yopish
+                await bot.AnswerCallbackQuery(update.CallbackQuery.Id);
+            }
+            return;
+        }
+
+        if (update.Message?.Type == MessageType.Text && update.Message.Text?.ToLower() == "/start")
+        {
+            await _bot.SendMessage(chatId, $"Botga xush kelibsiz nma yordam kk {name}");
+        }
+
+        else if (update.Message?.Text?.ToLower() == "inline")
+        {
+
+            // Asosiy ro'yxat (qatorlar ro'yxati)
+            var rows = new List<List<InlineKeyboardButton>>();
+            // Vaqtincha bitta qatorni ushlab turish uchun
+            var currentRow = new List<InlineKeyboardButton>();
+
+            foreach (var day in _data_ramadan)
+            {
+                // Tugmani yaratamiz
+                var button = InlineKeyboardButton.WithCallbackData(day.Key, day.Key);
+                currentRow.Add(button);
+
+                // Agar qatorda 2 ta tugma bo'lsa, uni asosiy ro'yxatga qo'shib, yangi qator ochamiz
+                if (currentRow.Count == 3)
+                {
+                    rows.Add(currentRow);
+                    currentRow = new List<InlineKeyboardButton>();
+                }
+            }
+
+            // Agar oxirida toq bo'lib bitta tugma qolib ketgan bo'lsa, uni ham qo'shamiz
+            if (currentRow.Any())
+            {
+                rows.Add(currentRow);
+            }
+
+            // InlineKeyboardMarkup ga uzatamiz
+            InlineKeyboardMarkup inline = new InlineKeyboardMarkup(rows);
+
+            await bot.SendMessage(
+                chatId: chatId,
+                text: "🌙 Ramazon taqvimi sanasini tanlang:",
+                replyMarkup: inline
+            );
+
+            /*
+            // Tugmalar ro'yxatini yaratamiz
+            var buttons = new List<InlineKeyboardButton[]>();
+
+            foreach (var day in _data_ramadan)
+            {
+                // Har bir sana uchun alohida qator (row) yaratamiz
+                var button = InlineKeyboardButton.WithCallbackData(day.Key, day.Key);
+                buttons.Add(new[] { button });
+            }
+
+            // Ro'yxatni klaviaturaga aylantiramiz
+            InlineKeyboardMarkup inline = new InlineKeyboardMarkup(buttons);
+
+            await bot.SendMessage(
+               chatId,
+                "Ramazon taqvimi sanasini tanlang:",
+                replyMarkup: inline
+            );
+            */
+        }
+
+
+       
+    }
+
+    private static Task HandleErrorAsync(ITelegramBotClient bot, Exception exception, CancellationToken ct)
+    {
+        var errorMessage = exception.GetFriendlyMessage();
+        
+        return Task.CompletedTask;
+    }
+}

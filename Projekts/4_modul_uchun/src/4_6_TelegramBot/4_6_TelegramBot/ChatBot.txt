@@ -1,0 +1,176 @@
+using Telegram.Bot;
+using Telegram.Bot.Exceptions;
+using Telegram.Bot.Polling;
+using Telegram.Bot.Types;
+using Telegram.Bot.Types.Enums;
+using Telegram.Bot.Types.ReplyMarkups;
+
+namespace _4_6_TelegramBot;
+
+class Program
+{
+    private static TelegramBotClient? _bot;
+
+    static async Task Main()
+    {
+        _bot = new TelegramBotClient("8783681570:AAFe2R-kYlfZ1YQas-C9goLdalBXJIAs-PI");
+
+        using var cts = new CancellationTokenSource();
+
+        var receiverOptions = new ReceiverOptions
+        {
+            AllowedUpdates = [] // Barcha updatelarni qabul qilish
+        };
+
+        _bot.StartReceiving(
+            HandleUpdateAsync,
+            HandleErrorAsync,
+            receiverOptions,
+            cancellationToken: cts.Token
+        );
+
+        Console.WriteLine("Bot ishga tushdi...");
+        Console.ReadLine();
+
+        cts.Cancel(); // Dastur yopilganda tokenni bekor qilish
+    }
+
+    // ==========================================
+    // 1. ALOHIDA XABAR YUBORISH METODI
+    // IReplyMarkup o'rniga ReplyMarkup ishlatamiz
+    // ==========================================
+    private static async Task SendMessageAsync(
+        long chatId,
+        string text,
+        ReplyMarkup? replyMarkup = null,
+        CancellationToken ct = default)
+    {
+        // Kutubxonaning 22-versiyasida "SendMessage" ishlatiladi ("Async" so'zisiz)
+        await _bot!.SendMessage(
+            chatId: chatId,
+            text: text,
+            replyMarkup: replyMarkup,
+            cancellationToken: ct
+        );
+    }
+
+    private static async Task HandleUpdateAsync(
+        ITelegramBotClient bot,
+        Update update,
+        CancellationToken ct)
+    {
+        if (update.Type == UpdateType.Message && update.Message?.Text != null)
+        {
+            await HandleMessageAsync(update.Message, ct);
+        }
+        else if (update.Type == UpdateType.CallbackQuery && update.CallbackQuery != null)
+        {
+            await HandleCallbackAsync(update.CallbackQuery, ct);
+        }
+    }
+
+    private static async Task HandleMessageAsync(
+        Message message,
+        CancellationToken ct)
+    {
+        var chatId = message.Chat.Id;
+        var text = message.Text!.ToLower();
+
+        if (text.Contains("salom"))
+        {
+            await SendMainMenu(chatId, ct);
+        }
+        else if (text.Contains("xayr"))
+        {
+            await SendMainMenu_Hayr(chatId, ct);
+        }
+        else
+        {
+            // O'zimizning alohida metod orqali jo'natamiz
+            await SendMessageAsync(chatId, "Iltimos 'Salom' yoki 'Xayr' deb yozing ??", ct: ct);
+        }
+    }
+
+    private static async Task HandleCallbackAsync(
+        CallbackQuery callback,
+        CancellationToken ct)
+    {
+        // Xabar mavjud bo'lsa chat ID sini olamiz
+        if (callback.Message is Message msg)
+        {
+            var chatId = msg.Chat.Id;
+            var data = callback.Data;
+
+            if (data == "contact")
+            {
+                await SendMessageAsync(chatId, "?? Biz bilan bog'lanish: +998 99 210 35 61", ct: ct);
+            }
+            else if (data == "about")
+            {
+                await SendMessageAsync(chatId, "?? PDP .NET G13 dasturchilar jamoasimiz ??", ct: ct);
+            }
+        }
+
+        // 22-versiyada AnswerCallbackQuery ("Async" so'zisiz)
+        await _bot!.AnswerCallbackQuery(
+            callbackQueryId: callback.Id,
+            cancellationToken: ct);
+    }
+
+    private static async Task SendMainMenu(
+        long chatId,
+        CancellationToken ct)
+    {
+        var keyboard = new InlineKeyboardMarkup(new[]
+        {
+        new[]
+        {
+            InlineKeyboardButton.WithCallbackData("?? Muloqot", "contact"),
+            InlineKeyboardButton.WithCallbackData("?? Biz haqimizda", "about")
+        }
+        });
+
+        await SendMessageAsync(
+            chatId,
+            "Va alaykum assalom ??\nQuyidagilardan birini tanlang:",
+            replyMarkup: keyboard,
+            ct: ct
+        );
+    }
+
+    private static async Task SendMainMenu_Hayr(
+        long chatId,
+        CancellationToken ct)
+    {
+        var keyboard = new InlineKeyboardMarkup(new[]
+        {
+        new[]
+        {
+            InlineKeyboardButton.WithCallbackData("?? Muloqot", "contact")
+        }
+        });
+
+        await SendMessageAsync(
+            chatId,
+            "Bizning botimizdan \nfoydalanganizdan xursandmiz??",
+            replyMarkup: keyboard,
+            ct: ct
+        );
+    }
+
+
+    private static Task HandleErrorAsync(
+        ITelegramBotClient bot,
+        Exception exception,
+        CancellationToken ct)
+    {
+        var errorMessage = exception switch
+        {
+            ApiRequestException apiReqException => $"Telegram API xatosi: {apiReqException.Message}",
+            _ => exception.ToString()
+        };
+
+        Console.WriteLine(errorMessage);
+        return Task.CompletedTask;
+    }
+}
